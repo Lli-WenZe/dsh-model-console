@@ -1,9 +1,9 @@
 {
   "name": "dsh-model-console",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": false,
-  "description": "DSH 全局模型控制台：一个面板统管所有对话的模型选择，支持批量切换、按闲置时间筛选、子代理树形折叠、批量归档/释放。",
-  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "model", "panel", "sidebar", "model-switch", "archive"],
+  "description": "DSH 全局模型控制台：一个面板统管所有对话的模型选择，支持批量切换、按闲置时间筛选、子代理树形折叠、批量归档/释放，并显示每个对话的 token 用量与参考价格。",
+  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "model", "panel", "sidebar", "model-switch", "archive", "usage", "price"],
   "license": "MIT",
   "type": "module",
   "exports": {

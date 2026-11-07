@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Model console",
-    "description": "Switch the model for every conversation at once, or for one conversation."
+    "description": "Switch the model for every conversation at once, or for one conversation, with token usage and a reference price per conversation."
   }
 }

@@ -9,6 +9,131 @@ window.__ModuleLoader__.load({
 		// Idle-age buckets offered by the toolbar; '' means no age filter.
 		const AGE_DAYS = [1, 3, 7, 14, 30, 90];
 
+		/**
+		 * Reference price book, USD per million tokens.
+		 *
+		 * The harness ships no pricing at all: `dsh-api-session-controller`'s
+		 * `buildModelCatalog` returns only id/name/reasoning/badge, and
+		 * `dsh-llm-pi-ai` states outright that it never reads cost metadata
+		 * (`replay.ts` zeroes it). So the only honest way to put a number next to
+		 * a model is a table that lives here, matched by provider first and by
+		 * model id second — the same model id can bill differently at two gateways.
+		 *
+		 * Shape: [inputPerMTok, outputPerMTok, cacheReadPerMTok, cacheWritePerMTok].
+		 * A missing cacheRead/cacheWrite entry falls back to a fraction of input,
+		 * which is the usual discount (cache read ~10%, cache write ~125%).
+		 */
+		const PRICE = {
+			// DeepSeek first-party list prices.
+			'deepseek-v4-pro': [0.55, 2.19, 0.055, 0.69],
+			'deepseek-v4': [0.27, 1.1, 0.027, 0.34],
+			'deepseek-v4.1-flash': [0.1, 0.4, 0.01, 0.125],
+			'deepseek-v4-flash': [0.1, 0.4, 0.01, 0.125],
+			'deepseek-chat': [0.27, 1.1, 0.027, 0.34],
+			'deepseek-reasoner': [0.55, 2.19, 0.055, 0.69],
+			// Alibaba / Qwen line.
+			'qwen-turbo': [0.05, 0.2, 0.005, 0.0625],
+			'qwen3-235b-a22b': [0.28, 1.12, 0.028, 0.35],
+			'qwen3-235b-a22b-instruct-2507': [0.28, 1.12, 0.028, 0.35],
+			'qwen3-235b-a22b-thinking-2507': [0.28, 1.12, 0.028, 0.35],
+			'qwen3-30b-a3b': [0.11, 0.45, 0.011, 0.14],
+			'qwen3-coder-480b-a35b-instruct': [0.7, 2.8, 0.07, 0.875],
+			'qwen3-vl-30b-a3b-thinking': [0.11, 0.45, 0.011, 0.14],
+			'qwen-vl-max-2025-01-25': [0.41, 1.23, 0.041, 0.51],
+			'qwen2.5-vl-72b-instruct': [0.41, 1.23, 0.041, 0.51],
+			// ByteDance Doubao line.
+			'doubao-1.5-pro-32k': [0.11, 0.28, 0.011, 0.14],
+			'doubao-1.5-thinking-pro': [0.56, 2.24, 0.056, 0.7],
+			'doubao-1.5-vision-pro': [0.42, 1.26, 0.042, 0.53],
+			'doubao-seed-1.6': [0.11, 1.1, 0.011, 0.14],
+			'doubao-seed-1.6-flash': [0.05, 0.22, 0.005, 0.0625],
+			'doubao-seed-1.6-thinking': [0.11, 1.1, 0.011, 0.14],
+			// Zhipu / Moonshot / Meituan.
+			'glm-4.5': [0.6, 2.2, 0.06, 0.75],
+			'glm-4.5-air': [0.2, 1.1, 0.02, 0.25],
+			'glm-52-night-discount-202607': [0.6, 2.2, 0.06, 0.75],
+			'kimi-k2': [0.6, 2.5, 0.06, 0.75],
+			'kimi-k2-turbo': [0.6, 2.5, 0.06, 0.75],
+			'meituan/longcat-flash-lite': [0.1, 0.4, 0.01, 0.125],
+			// WorkBuddy routes bill in credits, not dollars; the panel still shows a
+			// per-token estimate so a mixed-model list reads consistently.
+			'hy4free': [0, 0, 0, 0],
+			'hy4std': [0.29, 0.29, 0.029, 0.36],
+			'hy3free': [0, 0, 0, 0],
+			'hy3std': [0.29, 0.29, 0.029, 0.36],
+			'gpt-pro': [2.5, 10, 0.25, 3.13]
+		};
+
+		/**
+		 * Provider-level override: a gateway that resells someone else's weights
+		 * bills at its own rate, so its rate wins over the model-id default.
+		 */
+		const PRICE_BY_PROVIDER = {
+			'ohub': { 'deepseek-v4-pro': [0.55, 2.19, 0.055, 0.69], 'deepseek-v4.1-flash': [0.1, 0.4, 0.01, 0.125] },
+			'xunnia': { 'deepseek-v4-flash': [0.1, 0.4, 0.01, 0.125], 'deepseek-v4.1-flash': [0.1, 0.4, 0.01, 0.125] },
+			'qnaigc': { 'deepseek-v4.1-flash': [0.1, 0.4, 0.01, 0.125] }
+		};
+
+		/** [input, output, cacheRead, cacheWrite] for one route, or null. */
+		function priceOf(provider, model) {
+			const byProvider = PRICE_BY_PROVIDER[provider];
+			const direct = byProvider && byProvider[model];
+			const hit = direct || PRICE[model];
+			return hit || null;
+		}
+
+		/** "$0.10" style, dropping trailing zeros so a column of numbers stays narrow. */
+		function moneyText(value) {
+			if (value === 0) return '$0';
+			if (value < 0.01) return '$' + value.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+			return '$' + value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+		}
+
+		/** Human token counts: 1.2k / 3.4M so a wide number does not push the row. */
+		function tokenText(count) {
+			if (!Number.isFinite(count) || count <= 0) return '0';
+			if (count < 1000) return String(count);
+			if (count < 1000000) return (count / 1000).toFixed(count < 10000 ? 2 : 1).replace(/0+$/, '').replace(/\.$/, '') + 'k';
+			return (count / 1000000).toFixed(2).replace(/0+$/, '').replace(/\.$/, '') + 'M';
+		}
+
+		/**
+		 * Token totals for one conversation, read off the `tokenUsage` projection.
+		 * That projection is a summary key, so `session.list` already carries it and
+		 * no extra RPC is needed. Cold sessions whose cache missed simply have no
+		 * entry; they report null instead of a fake zero.
+		 */
+		function usageOf(item) {
+			const values = item.projections && item.projections.values;
+			const usage = values && values.tokenUsage;
+			if (!usage || typeof usage !== 'object') return null;
+			const input = Number(usage.uncachedInputTokens) || 0;
+			const output = Number(usage.outputTokens) || 0;
+			const cacheRead = Number(usage.cacheReadTokens) || 0;
+			const cacheWrite = Number(usage.cacheWriteTokens) || 0;
+			const total = input + output + cacheRead + cacheWrite;
+			if (total === 0) return null;
+			return { input, output, cacheRead, cacheWrite, total };
+		}
+
+		/** Estimated spend in USD, or null when the route has no reference price. */
+		function costOf(usage, provider, model) {
+			if (!usage) return null;
+			const price = priceOf(provider, model);
+			if (!price) return null;
+			const rate = (index, fallbackFactor) => {
+				const value = price[index];
+				return typeof value === 'number' ? value : price[0] * fallbackFactor;
+			};
+			const perMillion =
+				(usage.input * rate(0, 1) +
+					usage.output * rate(1, 4) +
+					usage.cacheRead * rate(2, 0.1) +
+					usage.cacheWrite * rate(3, 1.25));
+			return perMillion / 1000000;
+		}
+
+
 		const zh = {
 			panel: '模型控制台',
 			title: '模型控制台',
@@ -68,7 +193,16 @@ window.__ModuleLoader__.load({
 			archivedHide: '收起已归档',
 			archivedCount: '{count} 个已归档',
 			archivedHint: '归档的对话收在这里，勾选后点「批量释放」就能恢复。',
-			noAgeMatch: '这个时间段没有对话。'
+			noAgeMatch: '这个时间段没有对话。',
+			usageTitle: '用量与花费',
+			usageTokens: '{tokens} tok',
+			usageCost: '≈ {cost}',
+			usageDetail: '输入 {in} · 输出 {out} · 缓存读 {cacheRead} · 缓存写 {cacheWrite}',
+			usageTotal: '合计 {tokens} tok · ≈ {cost}',
+			usageTotalTokens: '合计 {tokens} tok',
+			usageNote: '用量来自会话用量投影，花费按内置参考价估算，不等于账单。',
+			pricePair: '{input} / {output}',
+			priceHint: '参考价（美元 / 百万 token）：输入 / 输出',
 		};
 
 		const en = {
@@ -130,7 +264,16 @@ window.__ModuleLoader__.load({
 			archivedHide: 'Hide archived',
 			archivedCount: '{count} archived',
 			archivedHint: 'Archived conversations live here — tick them and use "Release selected" to bring them back.',
-			noAgeMatch: 'No conversations in this range.'
+			noAgeMatch: 'No conversations in this range.',
+			usageTitle: 'Usage and spend',
+			usageTokens: '{tokens} tok',
+			usageCost: '≈ {cost}',
+			usageDetail: 'In {in} · Out {out} · Cache read {cacheRead} · Cache write {cacheWrite}',
+			usageTotal: '{tokens} tok total · ≈ {cost}',
+			usageTotalTokens: '{tokens} tok total',
+			usageNote: 'Usage comes from the session usage projection; spend is estimated from built-in reference prices, not a bill.',
+			pricePair: '{input} / {output}',
+			priceHint: 'Reference price (USD / million tokens): input / output',
 		};
 
 		const CSS = [
@@ -193,6 +336,10 @@ window.__ModuleLoader__.load({
 			'.mc-option:hover{background:var(--dsw-alias-bg-layer-2)}',
 			'.mc-option[data-active="true"]{background:var(--dsw-alias-bg-layer-2);font-weight:600}',
 			'.mc-option-name{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+			'.mc-option-price{flex:0 0 auto;color:var(--dsw-alias-label-secondary);font-size:11px;font-variant-numeric:tabular-nums}',
+			'.mc-usage{flex:0 0 auto;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;white-space:nowrap}',
+			'.mc-usage-tokens{color:var(--dsw-alias-label-primary)}',
+			'.mc-usage-cost{padding:0 5px;border:1px solid var(--dsw-alias-border-l1);border-radius:999px;line-height:16px}',
 			'.mc-option-mark{flex:0 0 auto;color:var(--dsw-alias-brand-primary);font-size:12px}',
 			'.mc-divider{margin:14px 0 4px;border-top:1px solid var(--dsw-alias-border-l1)}',
 			'.mc-toggle{display:flex;align-items:center;gap:8px;width:100%;margin-top:12px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:13px;cursor:pointer;text-align:left}',
@@ -229,7 +376,8 @@ window.__ModuleLoader__.load({
 						modelName: model.name || model.id,
 						groupName: bucket.name,
 						efforts: (reasoning && reasoning.efforts) || [],
-						defaultEffort: reasoning && reasoning.defaultEffort
+						defaultEffort: reasoning && reasoning.defaultEffort,
+						price: priceOf(group.id, model.id)
 					};
 					rows.push(row);
 					byKey.set(row.key, row);
@@ -398,6 +546,16 @@ window.__ModuleLoader__.load({
 													}
 												},
 												h('span', { className: 'mc-option-name' }, row.modelName),
+												row.price
+													? h(
+															'span',
+															{ className: 'mc-option-price', title: t('priceHint') },
+															format(t('pricePair'), {
+																input: moneyText(row.price[0]),
+																output: moneyText(row.price[1])
+															})
+														)
+													: null,
 												current &&
 												current.provider === row.provider &&
 												current.model === row.model
@@ -439,6 +597,9 @@ window.__ModuleLoader__.load({
 			const draftEfforts = effortsOf(byKey, draft);
 			const sessionId = item.sessionId;
 			const age = ageTextOf(item, t);
+			// Usage rides on the row's own projection: no extra RPC, no polling.
+			const usage = usageOf(item);
+			const cost = usage ? costOf(usage, current && current.provider, current && current.model) : null;
 			// Archived rows stay legible but visually recede, so the live list owns attention.
 			const rowClass = 'mc-item' + (nested ? ' mc-item-child' : '') + (archived ? ' mc-item-archived' : '');
 			return h(
@@ -492,9 +653,28 @@ window.__ModuleLoader__.load({
 						t('current') +
 							': ' +
 							(current ? labelOf(byKey, current) : t('noModel')) +
-							(age ? ' · ' + age : '')
+							(age ? ' · ' + age : '') +
+							(usage ? ' · ' + format(t('usageTokens'), { tokens: tokenText(usage.total) }) : '')
 					)
 				),
+				usage
+					? h(
+							'div',
+							{
+								className: 'mc-usage',
+								title: format(t('usageDetail'), {
+									in: tokenText(usage.input),
+									out: tokenText(usage.output),
+									cacheRead: tokenText(usage.cacheRead),
+									cacheWrite: tokenText(usage.cacheWrite)
+								})
+							},
+							h('span', { className: 'mc-usage-tokens' }, tokenText(usage.total) + ' tok'),
+							cost === null
+								? null
+								: h('span', { className: 'mc-usage-cost' }, format(t('usageCost'), { cost: moneyText(cost) }))
+						)
+					: null,
 				item.running ? h('span', { className: 'mc-badge' }, t('running')) : null,
 				nested ? null : item.origin === 'subagent' ? h('span', { className: 'mc-badge' }, t('subagent')) : null,
 				h(
@@ -1096,6 +1276,25 @@ window.__ModuleLoader__.load({
 			let selectedCount = 0;
 			for (const id of Object.keys(selected)) if (visibleIds.has(id)) selectedCount += 1;
 
+			// Fleet-wide usage. Every row already carries its own numbers; this is
+			// the same sum without a second pass over the Host.
+			let totalTokens = 0;
+			let totalCost = 0;
+			let anyUsage = false;
+			let anyCost = false;
+			for (const item of sessions) {
+				const usage = usageOf(item);
+				if (!usage) continue;
+				anyUsage = true;
+				totalTokens += usage.total;
+				const current = currents[item.sessionId];
+				const cost = current ? costOf(usage, current.provider, current.model) : null;
+				if (cost !== null) {
+					totalCost += cost;
+					anyCost = true;
+				}
+			}
+
 			return h(
 				'div',
 				{ className: 'mc-root' },
@@ -1163,6 +1362,27 @@ window.__ModuleLoader__.load({
 								style: { marginBottom: 12 }
 							},
 							notice.text
+						)
+					: null,
+				anyUsage
+					? h(
+							'div',
+							{ className: 'mc-card' },
+							h(
+								'div',
+								{ className: 'mc-row', style: { alignItems: 'center', margin: 0 } },
+								h('h2', { className: 'mc-card-title', style: { margin: 0 } }, t('usageTitle')),
+								h('div', { className: 'mc-spacer' }),
+								h(
+									'span',
+									{ className: 'mc-sub' },
+									format(t(anyCost ? 'usageTotal' : 'usageTotalTokens'), {
+										tokens: tokenText(totalTokens),
+										cost: moneyText(totalCost)
+									})
+								)
+							),
+							h('p', { className: 'mc-card-hint', style: { margin: '6px 0 0' } }, t('usageNote'))
 						)
 					: null,
 				h(
