@@ -1,0 +1,3 @@
+- insert:
+    - id: model-console
+      name: 'dsh-model-console'
