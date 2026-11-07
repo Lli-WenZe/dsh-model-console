@@ -134,6 +134,30 @@ window.__ModuleLoader__.load({
 		}
 
 
+		/**
+		 * One probe result per provider route. A lamp is a fact about the route, not
+		 * about a model: one listing request answers for every model behind it.
+		 */
+		function lampOf(pings, provider) {
+			const entry = pings && provider ? pings[provider] : null;
+			if (!entry) return { state: 'idle', text: '' };
+			if (entry.state === 'busy') return { state: 'busy', text: '' };
+			if (entry.state === 'ok') {
+				return { state: 'ok', text: entry.ms === null ? '' : entry.ms + ' ms', ms: entry.ms };
+			}
+			return { state: 'bad', text: '', message: entry.message || null, ms: entry.ms };
+		}
+
+		/** Row caption: the route's round trip, or nothing until the probe ran. */
+		function probeTextOf(pings, provider, t) {
+			const entry = pings && provider ? pings[provider] : null;
+			if (!entry) return '';
+			if (entry.state === 'busy') return t('probing');
+			if (entry.state === 'ok' && typeof entry.ms === 'number') return format(t('probeOk'), { ms: entry.ms });
+			if (entry.state === 'bad') return t('probeFail');
+			return '';
+		}
+
 		const zh = {
 			panel: '模型控制台',
 			title: '模型控制台',
@@ -203,6 +227,14 @@ window.__ModuleLoader__.load({
 			usageNote: '用量来自会话用量投影，花费按内置参考价估算，不等于账单。',
 			pricePair: '{input} / {output}',
 			priceHint: '参考价（美元 / 百万 token）：输入 / 输出',
+			probe: '探活',
+			probing: '探活中…',
+			probeOk: '{ms} ms',
+			probeFail: '不通',
+			probeSummary: '探活完成：{ok} 个通，{fail} 个不通',
+			probeNone: '没有可探活的 provider',
+			probeHint: '逐个请求各 provider 的模型清单接口，只消耗网络达往，不产生 token 费用',
+			lampIdle: '尚未探测',
 		};
 
 		const en = {
@@ -274,6 +306,14 @@ window.__ModuleLoader__.load({
 			usageNote: 'Usage comes from the session usage projection; spend is estimated from built-in reference prices, not a bill.',
 			pricePair: '{input} / {output}',
 			priceHint: 'Reference price (USD / million tokens): input / output',
+			probe: 'Probe',
+			probing: 'Probing…',
+			probeOk: '{ms} ms',
+			probeFail: 'down',
+			probeSummary: 'Probe finished: {ok} up, {fail} down',
+			probeNone: 'No provider can be probed',
+			probeHint: 'Ask each provider for its model listing. This is one network round trip and costs no tokens.',
+			lampIdle: 'Not probed yet',
 		};
 
 		const CSS = [
@@ -315,7 +355,7 @@ window.__ModuleLoader__.load({
 			'.mc-item-archived .mc-item-title{color:var(--dsw-alias-label-secondary)}',
 			'.mc-toggle-archived{background:transparent;border-style:dashed}',
 			'.mc-archived-hint{margin:6px 0 2px;color:var(--dsw-alias-label-secondary);font-size:12px}',
-			'.mc-caret-slot{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:36px}',
+			'.mc-caret-slot{flex:0 0 auto;display:flex;align-items:center;justify-content:center;gap:6px;min-width:36px}',
 			'.mc-caret{display:inline-flex;align-items:center;gap:3px;height:22px;padding:0 6px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:1;cursor:pointer}',
 			'.mc-caret:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}',
 			'.mc-item-main{flex:1 1 auto;min-width:0}',
@@ -337,6 +377,13 @@ window.__ModuleLoader__.load({
 			'.mc-option[data-active="true"]{background:var(--dsw-alias-bg-layer-2);font-weight:600}',
 			'.mc-option-name{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
 			'.mc-option-price{flex:0 0 auto;color:var(--dsw-alias-label-secondary);font-size:11px;font-variant-numeric:tabular-nums}',
+			'.mc-lamp{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-border-l1);box-shadow:inset 0 0 0 1px rgba(0,0,0,.06)}',
+			'.mc-lamp[data-state="ok"]{background:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,.2)}',
+			'.mc-lamp[data-state="bad"]{background:#ef4444;box-shadow:0 0 0 2px rgba(239,68,68,.2)}',
+			'.mc-lamp[data-state="busy"]{background:#94a3b8;animation:mc-pulse 1s ease-in-out infinite}',
+			'@keyframes mc-pulse{0%,100%{opacity:.35}50%{opacity:1}}',
+			'.mc-lamp-ms{margin-left:6px;color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:400;font-variant-numeric:tabular-nums}',
+			'.mc-group-head{display:flex;align-items:center;gap:6px}',
 			'.mc-usage{flex:0 0 auto;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;white-space:nowrap}',
 			'.mc-usage-tokens{color:var(--dsw-alias-label-primary)}',
 			'.mc-usage-cost{padding:0 5px;border:1px solid var(--dsw-alias-border-l1);border-radius:999px;line-height:16px}',
@@ -442,7 +489,7 @@ window.__ModuleLoader__.load({
 		 * means thousands of <option> nodes; this keeps the DOM at a few hundred.
 		 */
 		function ModelPickerOverlay(props) {
-			const { index, current, onPick, onClose, t } = props;
+			const { index, current, onPick, onClose, t, pings } = props;
 			const [query, setQuery] = React.useState('');
 			const inputRef = React.useRef(null);
 
@@ -525,8 +572,14 @@ window.__ModuleLoader__.load({
 										h(
 											'div',
 											{ className: 'mc-group' },
+											h(
+												'div',
+												{ className: 'mc-group-head' },
+												h('span', { className: 'mc-lamp', 'data-state': lampOf(pings, group.id).state, title: lampOf(pings, group.id).message || (lampOf(pings, group.id).text || t('lampIdle')) }),
 											group.name,
-											h('span', { className: 'mc-group-count' }, '(' + group.rows.length + ')')
+											h('span', { className: 'mc-group-count' }, '(' + group.rows.length + ')')	,
+												lampOf(pings, group.id).text ? h('span', { className: 'mc-lamp-ms' }, lampOf(pings, group.id).text) : null
+											)
 										),
 										group.rows.map((row) =>
 											h(
@@ -545,6 +598,7 @@ window.__ModuleLoader__.load({
 														onPick(row);
 													}
 												},
+												h('span', { className: 'mc-lamp', 'data-state': lampOf(pings, row.provider).state, title: lampOf(pings, row.provider).message || (lampOf(pings, row.provider).text || t('lampIdle')) }),
 												h('span', { className: 'mc-option-name' }, row.modelName),
 												row.price
 													? h(
@@ -592,11 +646,14 @@ window.__ModuleLoader__.load({
 				nested,
 				selected,
 				onSelect,
-				archived
+				archived,
+				pings
 			} = props;
 			const draftEfforts = effortsOf(byKey, draft);
 			const sessionId = item.sessionId;
 			const age = ageTextOf(item, t);
+			// A lamp belongs to the route this row currently runs on, not to every route.
+			const probe = probeTextOf(pings, current && current.provider, t);
 			// Usage rides on the row's own projection: no extra RPC, no polling.
 			const usage = usageOf(item);
 			const cost = usage ? costOf(usage, current && current.provider, current && current.model) : null;
@@ -627,6 +684,11 @@ window.__ModuleLoader__.load({
 				h(
 					'div',
 					{ className: 'mc-caret-slot' },
+					h('span', {
+						className: 'mc-lamp',
+						'data-state': lampOf(pings, current && current.provider).state,
+						title: lampOf(pings, current && current.provider).message || (lampOf(pings, current && current.provider).text || t('lampIdle'))
+					}),
 					childCount > 0
 						? h(
 								'button',
@@ -654,7 +716,8 @@ window.__ModuleLoader__.load({
 							': ' +
 							(current ? labelOf(byKey, current) : t('noModel')) +
 							(age ? ' · ' + age : '') +
-							(usage ? ' · ' + format(t('usageTokens'), { tokens: tokenText(usage.total) }) : '')
+							(usage ? ' · ' + format(t('usageTokens'), { tokens: tokenText(usage.total) }) : '') +
+							(probe ? ' · ' + probe : '')
 					)
 				),
 				usage
@@ -763,6 +826,12 @@ window.__ModuleLoader__.load({
 			const selectedRef = React.useRef({});
 			const [archived, setArchived] = React.useState({});
 			const archivedRef = React.useRef({});
+			// Probe results keyed by provider route, plus the provider -> settingsNs
+			// directory a probe needs. Both stay empty until the user asks for a probe.
+			const [pings, setPings] = React.useState({});
+			const pingsRef = React.useRef({});
+			const [providerNs, setProviderNs] = React.useState({});
+			const [probing, setProbing] = React.useState(false);
 
 			// Mirrors of the two per-session maps. Handlers read them instead of closing
 			// over state, which keeps every row callback referentially stable.
@@ -832,6 +901,37 @@ window.__ModuleLoader__.load({
 			React.useEffect(() => {
 				load();
 			}, [load]);
+
+			/**
+			 * Provider -> settings namespace. Each adapter registers one discovery
+			 * namespace for all of its routes, so this map is what makes a probe possible
+			 * without hard-coding any namespace name. A Host without the llm Remote, or
+			 * without the directory, simply leaves the map empty.
+			 */
+			React.useEffect(() => {
+				let cancelled = false;
+				async function readDirectory() {
+					const remote = activeRemote;
+					if (!remote || !remote.llm || typeof remote.llm.listConfigurableProviders !== 'function') return;
+					try {
+						const answer = await remote.llm.listConfigurableProviders();
+						if (cancelled || !answer || answer.ok !== true) return;
+						const next = {};
+						for (const entry of answer.value || []) {
+							if (!entry || typeof entry.provider !== 'string') continue;
+							if (typeof entry.settingsNs !== 'string' || entry.settingsNs.length === 0) continue;
+							next[entry.provider] = entry.settingsNs;
+						}
+						if (!cancelled) setProviderNs(next);
+					} catch (ignored) {
+						/* the panel keeps working without probes */
+					}
+				}
+				readDirectory();
+				return () => {
+					cancelled = true;
+				};
+			}, []);
 
 			/**
 			 * Mirror the Host archive set. The Workspace model already owns the live
@@ -1008,6 +1108,58 @@ window.__ModuleLoader__.load({
 				setSelected(next);
 			}, []);
 
+			/**
+			 * Ask every configured route for its model listing and time the round trip.
+			 * A listing is a plain GET: it spends no tokens. Routes run one after another
+			 * so a probe never turns into a burst of parallel requests against a provider.
+			 */
+			const pingAll = React.useCallback(async () => {
+				const providers = Object.keys(providerNs);
+				if (providers.length === 0) {
+					setNotice({ kind: 'error', text: t('probeNone') });
+					return;
+				}
+				setProbing(true);
+				setNotice(null);
+				const next = { ...pingsRef.current };
+				for (const provider of providers) next[provider] = { state: 'busy', ms: null };
+				pingsRef.current = next;
+				setPings(next);
+				let ok = 0;
+				let fail = 0;
+				for (const provider of providers) {
+					const ns = providerNs[provider];
+					const started = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+					let entry;
+					try {
+						const answer = await activeRemote.llm.discoverModels(ns, { provider });
+						const elapsed = (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) - started;
+						const ms = Math.max(0, Math.round(elapsed));
+						if (answer && answer.ok === true) {
+							// An empty listing still means the route answered; the lamp is about reachability.
+							entry = { state: 'ok', ms };
+							ok += 1;
+						} else {
+							entry = { state: 'bad', ms, message: (answer && answer.error && answer.error.message) || 'unknown' };
+							fail += 1;
+						}
+					} catch (caught) {
+						const elapsed = (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) - started;
+						entry = {
+							state: 'bad',
+							ms: Math.max(0, Math.round(elapsed)),
+							message: caught instanceof Error ? caught.message : String(caught)
+						};
+						fail += 1;
+					}
+					next[provider] = entry;
+					pingsRef.current = { ...next };
+					setPings({ ...next });
+				}
+				setProbing(false);
+				setNotice({ kind: fail === 0 ? 'ok' : 'error', text: format(t('probeSummary'), { ok, fail }) });
+			}, [providerNs, t]);
+
 			/** Archive (or release) every selected conversation, four lanes at a time. */
 			const runBulk = React.useCallback(
 				async (mode) => {
@@ -1178,6 +1330,7 @@ window.__ModuleLoader__.load({
 					selected: selected[item.sessionId] === true,
 					onSelect: toggleSelect,
 					archived: archived[item.sessionId] === true,
+					pings,
 					...(extra || {})
 				});
 			}
@@ -1452,7 +1605,24 @@ window.__ModuleLoader__.load({
 							t('selectNone')
 						),
 						h('span', { className: 'mc-sub' }, format(t('selectedCount'), { count: selectedCount })),
-						h('div', { className: 'mc-spacer' }),
+						// Probing is user-initiated on purpose: a listing request is cheap but
+						// nobody should be sending traffic to seven providers behind their back.
+						caps.probe
+							? h(
+									'button',
+									{
+										type: 'button',
+										className: 'mc-btn mc-btn-sm',
+										disabled: probing || busy !== null,
+										title: t('probeHint'),
+										onClick() {
+											pingAll();
+										}
+									},
+									probing ? t('probing') : t('probe')
+								)
+							: null,
+							h('div', { className: 'mc-spacer' }),
 						// Archive half is optional: a Host without those RPCs loses the two
 						// buttons and the archived group instead of failing every action.
 						caps.archive
@@ -1577,7 +1747,8 @@ window.__ModuleLoader__.load({
 							current: pickerCurrent,
 							onPick: pickRow,
 							onClose: closePicker,
-							t
+							t,
+							pings
 						})
 					: null
 			);
@@ -1607,7 +1778,7 @@ window.__ModuleLoader__.load({
 		// makes it wait for two services literally named "required"/"optional" and the
 		// whole entry stays pending forever. A plain array is the safe form everywhere;
 		// graceful degradation is done at runtime by probeCapabilities() instead.
-		const inject = ['slots', 'locale', 'remote', 'remote.session', 'workspaces', 'uiWorkspace'];
+		const inject = ['slots', 'locale', 'remote', 'remote.session', 'remote.llm', 'workspaces', 'uiWorkspace'];
 
 		let activeRemote = null;
 		let activeLocale = null;
@@ -1615,7 +1786,7 @@ window.__ModuleLoader__.load({
 		let activeUiWorkspace = null;
 
 		// Capability flags resolved by probeCapabilities(); false hides the feature.
-		const caps = { archive: false, catalog: false, picker: true };
+		const caps = { archive: false, catalog: false, picker: true, probe: false };
 
 		function probeCapabilities(ctx) {
 			const workspaces = ctx.workspaces || null;
@@ -1629,6 +1800,10 @@ window.__ModuleLoader__.load({
 				!!ctx.remote &&
 				!!ctx.remote.session &&
 				typeof ctx.remote.session.modelCatalog === 'function';
+			// Probing asks a provider for its model listing: one GET, no tokens. Hosts
+			// without the llm Remote keep the panel and lose only the lamp.
+			caps.probe =
+				!!ctx.remote && !!ctx.remote.llm && typeof ctx.remote.llm.discoverModels === 'function';
 			return caps;
 		}
 
